@@ -79,7 +79,7 @@ static void *find_fit( size_t asize, size_t flag );
 static void place(void *bp, size_t asize);
 static void *extend_heap(size_t words);
 
-static size_t find_fit_flag = 3;
+static size_t find_fit_flag = 2;
 
 static void *extend_heap(size_t words)
 {
@@ -398,6 +398,14 @@ void *mm_realloc(void *ptr, size_t size)
 
     size_t asize;
     // printf("사이즈가 더 큼?");
+    if (ptr == NULL){
+        newptr = mm_malloc(size);
+        return newptr;
+    } 
+    if (size == 0){
+        mm_free(ptr);
+        return NULL;
+    }
 
     int now_size = GET_SIZE(HDRP(oldptr));
     int prev_is_alloc = GET_ALLOC(FTRP(PREV_BLKP( oldptr )));
@@ -405,9 +413,11 @@ void *mm_realloc(void *ptr, size_t size)
     int next_is_alloc = GET_ALLOC(HDRP(NEXT_BLKP( oldptr )));
     int next_size = GET_SIZE(HDRP(NEXT_BLKP( oldptr )));
     
-    if( prev_is_alloc && next_is_alloc ){ // 앞뒤 블록이 할당 되있는 경우
-    }
-    else if ( prev_is_alloc && !next_is_alloc ){ // 앞 블록이 할당 되있는 경우
+    // if( prev_is_alloc && next_is_alloc ){ // 앞뒤 블록이 할당 되있는 경우
+    //     // 가독성 향상을 위해 코드 위치 변경
+    // }
+    // else 
+    if ( prev_is_alloc && !next_is_alloc ){ // 앞 블록이 할당 되있는 경우
         asize = getAsize(size);
         if( (now_size + next_size) <= asize ){
             oldptr = coalesce( oldptr );
