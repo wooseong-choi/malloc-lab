@@ -71,10 +71,15 @@ team_t team = {
 #define PREV_BLKP(bp) (((char *)(bp) - GET_SIZE((char *)(bp) - DSIZE)))
 
 void *heap_listp;
+
+static void *next_fit_sbp = NULL; // search block pointer
+
 static void *coalesce(void *bp);
-static void *find_fit( size_t asize );
+static void *find_fit( size_t asize, size_t flag );
 static void place(void *bp, size_t asize);
 static void *extend_heap(size_t words);
+
+static size_t find_fit_flag = 3;
 
 static void *extend_heap(size_t words)
 {
@@ -92,6 +97,10 @@ static void *extend_heap(size_t words)
     PUT(FTRP(bp), PACK(size,0)); // 가용 블록 푸터
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0,1)); // 새 에필로그 헤더
 
+    if(find_fit_flag == 2){
+        next_fit_sbp = NEXT_BLKP(bp);
+    }
+
     // 이전 블록이 가용 블록인 경우 병합
     return coalesce(bp);
 }
@@ -102,6 +111,9 @@ static void *coalesce(void *bp)
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 이전 블록의 크기 반환 
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp))); // 다음 블록의 크기 반환
     size_t size = GET_SIZE(HDRP(bp)); // 현재 블록의 크기 반환
+    
+    // printf("test1 %d ",GET_SIZE(FTRP(PREV_BLKP(bp))));
+    // printf("test2 %d ",GET_SIZE(HDRP(NEXT_BLKP(bp))));
 
     if( prev_alloc && next_alloc ){ // 이전 블록과 다음 블록이 할당되었다면 case 1
         return bp; // 현재 블록 포인터만 반환
@@ -129,6 +141,11 @@ static void *coalesce(void *bp)
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp); 
     }
+
+    if(find_fit_flag == 2){
+        next_fit_sbp = bp; // 왜 이걸 주석하면 오류가 나는지 모르겠네
+    }
+
     return bp;
 }
 
@@ -154,6 +171,10 @@ int mm_init(void)
     /* 여기까지 했을때 전체 힙의 모양은 
         빈공간 + 프롤로그 헤더 + 프롤로그 푸터 + 에필로그 헤더가 된다. */
     heap_listp += (2*WSIZE); // 힙 가용 리스트 포인터의 위치를 프롤로그 블록과 에필로그 블록의 사이로 한다.
+    
+    if(find_fit_flag == 2){
+        next_fit_sbp = heap_listp;
+    }
 
     /* 청크 사이즈의 가용 블록으로 빈 힙을 확장한다. */
     if(extend_heap(CHUNKSIZE/WSIZE) == NULL){
@@ -161,6 +182,17 @@ int mm_init(void)
     }
     
     return 0;
+}
+
+size_t getAsize(size_t size){
+    size_t asize;
+        /* 오버헤드 및 정렬 요구 사항을 포함하도록 블록 크기를 조정합니다. */
+    if(size <= DSIZE){
+        asize = 2*DSIZE; // 왜 16바이트인가... 헤더 1블록 4바이트, 푸터 1블록 4바이트, 데이터는 정렬 조건을 맞추기 위해 2블록 이상 필요
+    }else{
+        asize = DSIZE * (( size + (DSIZE) + (DSIZE-1) ) / DSIZE);
+    }
+    return asize;    
 }
 
 /* 
@@ -180,14 +212,12 @@ void *mm_malloc(size_t size)
     }
     
     /* 오버헤드 및 정렬 요구 사항을 포함하도록 블록 크기를 조정합니다. */
-    if(size <= DSIZE){
-        asize = 2*DSIZE; // 왜 16바이트인가... 헤더 1블록 4바이트, 푸터 1블록 4바이트, 데이터는 정렬 조건을 맞추기 위해 2블록 이상 필요
-    }else{
-        asize = DSIZE * (( size + (DSIZE) + (DSIZE-1) ) / DSIZE);
-    }
+
+    asize = getAsize(size);
+
     // printf("작동 시작");
     /* 적합한 가용영역 검색 */
-    if ((bp = find_fit(asize)) != NULL){
+    if ((bp = find_fit(asize, find_fit_flag)) != NULL){
         place(bp, asize);
         return bp;
     }
@@ -202,11 +232,12 @@ void *mm_malloc(size_t size)
 
 }
 
-static void *find_fit( size_t asize )
+
+static void *find_fit( size_t asize, size_t flag )
 {   
     // printf("find fit");
     // char *temp = heap_listp; // 템프 받음
-    // 맨땅 코드 
+    // // 맨땅 코드 
     // while (NEXT_BLKP(temp) != NULL && GET_SIZE(NEXT_BLKP(temp)) != 0) // 다음블록이 없거나, 다음 블록의 사이즈가 0일때 == 에필로그 블록일 경우
     // {
     //     if ( GET_ALLOC(HDRP(temp))){ // 메모리가 할당 되어 있다면?
@@ -220,15 +251,99 @@ static void *find_fit( size_t asize )
     //         }
     //     }
             
-    // }
+    // } // 특정 상황에서 while문을 탈출하지 못하는것 같다.
     // 1차 최적화-답지
     // 분기가 적어서? 
     void *bp;
-    for (bp = (char*)heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
-        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
-            return bp;
+
+    if (flag == 1){ // first fit
+        for (bp = (char*)heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+            if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+                return bp;
+            }
+        }
+    }else if(flag == 2){ // next fit
+        // 선조의 깔끔한 코드. 왜 안되는지 찾다가 보았다.
+        // void *old_pointp = next_fit_sbp;
+        // for (bp = next_fit_sbp; GET_SIZE(HDRP(bp)); bp = NEXT_BLKP(bp))
+        // {
+        //     if (!GET_ALLOC(HDRP(bp)) && GET_SIZE(HDRP(bp)) >= asize)
+        //     {
+        //         next_fit_sbp = NEXT_BLKP(bp);
+        //         return bp;
+        //     }
+        // }
+        // for (bp = heap_listp; bp < old_pointp; bp = NEXT_BLKP(bp))
+        // {
+        //     if ((!GET_ALLOC(HDRP(bp))) && GET_SIZE(HDRP(bp)) >= asize)
+        //     {
+        //         next_fit_sbp = NEXT_BLKP(bp);
+        //         return bp;
+        //     }
+        // }
+        // return NULL;
+        
+        // if (next_fit_sbp == NULL){ // init에서 초기화 해주도록 변경
+        //     next_fit_sbp = (char*)heap_listp;
+        // } 
+        // 여기부터 내가 작성한 코드
+        // if (GET_SIZE(HDRP(NEXT_BLKP(next_fit_sbp))) == 0)
+        // { // 에필로그 블록까지 next_fit 검색 포인터가 이동했다면 다시 prollogue 블록으로 포인터이동
+            // printf("is epillogue block");
+            // next_fit_sbp = (char*)heap_listp; //이 로직을 없애면 성능이 향상된다.
+        // }
+        // 왜 안되는지 모르겠네
+
+        // else bp = (char*)heap_listp;
+        // for (bp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+        //     if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+        //         next_fit_sbp = bp;
+        //         return bp;
+        //     }
+        // }
+        for (bp = (char*)next_fit_sbp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+            if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+        // printf("1차 값 갱신\n");
+                next_fit_sbp = NEXT_BLKP(bp); // 다음 탐색 위치 갱신
+                return bp;
+            }
+        }
+        // printf("1차 통과\n");
+        // 다음 fit을 위해 처음부터 다시 탐색
+        for (bp = (char*)heap_listp; bp != next_fit_sbp; bp = NEXT_BLKP(bp)) {
+            if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))) ) {
+        // printf("2차 값 갱신\n");
+                next_fit_sbp = NEXT_BLKP(bp); // 다음 탐색 위치 갱신
+                return bp;
+            }
+        }
+
+    }else if(flag == 3){ // best fit
+        void *bp_temp = NULL;
+        // printf(" bp_temp %d \n", GET_SIZE(HDRP(bp_temp)));
+        for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+            if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+                // printf("in for ..  bp_temp %d bp .. %d\n", GET_SIZE(HDRP(bp_temp)),GET_SIZE(HDRP(bp)));
+                if (bp_temp != NULL){
+                    if ( GET_SIZE(HDRP(bp_temp)) > GET_SIZE(HDRP(bp)) ){
+                        bp_temp = bp;
+                    }
+                }else{
+                    bp_temp = bp;
+                }
+            }
+        }
+        return bp_temp;
+        
+    }else{ // first fit
+        for (bp = (char*)heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+            if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+                return bp;
+            }
         }
     }
+
+
 
     return NULL;
 }
@@ -237,16 +352,24 @@ static void place( void *bp, size_t asize )
 {
     // printf("place\n");
     size_t csize = GET_SIZE(HDRP(bp)); // 현재 빈 공간의 크기 저장
-
+    // printf("csize  %d\n",csize);
     if((csize - asize) >= (2*DSIZE)){ // 현재 빈 공간에서 할당할 공간을 뺀 합이 16 바이트 보다 크다면
         PUT(HDRP(bp), PACK(asize,1)); // 데이터 공간 할당
         PUT(FTRP(bp), PACK(asize,1)); // 데이터 공간 할당
         bp = NEXT_BLKP(bp); // 다음 블록으로 이동
         PUT(HDRP(bp), PACK(csize-asize,0)); // 이동한 블럭의 헤더를 설정해 준다.
         PUT(FTRP(bp), PACK(csize-asize,0)); // 푸터를설정해 주어 가용 데이터 블록을 분할한다.
+
+        if(find_fit_flag == 2){
+            next_fit_sbp = bp;
+        }
+
     }else{ // 16바이트 보다 작다면 그냥 할당
         PUT(HDRP(bp), PACK(csize,1));
         PUT(FTRP(bp), PACK(csize,1));
+        if(find_fit_flag == 2){
+            next_fit_sbp = NEXT_BLKP(bp);
+        }
     }
 }
 
@@ -272,16 +395,94 @@ void *mm_realloc(void *ptr, size_t size)
     void *oldptr = ptr;
     void *newptr;
     size_t copySize;
+
+    size_t asize;
+    // printf("사이즈가 더 큼?");
+
+    int now_size = GET_SIZE(HDRP(oldptr));
+    int prev_is_alloc = GET_ALLOC(FTRP(PREV_BLKP( oldptr )));
+    int prev_size = GET_SIZE(FTRP(PREV_BLKP(oldptr )));
+    int next_is_alloc = GET_ALLOC(HDRP(NEXT_BLKP( oldptr )));
+    int next_size = GET_SIZE(HDRP(NEXT_BLKP( oldptr )));
     
+    if( prev_is_alloc && next_is_alloc ){ // 앞뒤 블록이 할당 되있는 경우
+    }
+    else if ( prev_is_alloc && !next_is_alloc ){ // 앞 블록이 할당 되있는 경우
+        asize = getAsize(size);
+        if( (now_size + next_size) <= asize ){
+            oldptr = coalesce( oldptr );
+            place(oldptr, asize);
+            return oldptr;
+        }
+    }
+    else if ( !prev_is_alloc && next_is_alloc ){ // 뒤 블록이 할당 되있는 경우
+        asize = getAsize(size);
+        if( (now_size + prev_size) <= asize ){
+            oldptr = coalesce( oldptr );
+            place(oldptr, asize);
+            return oldptr;
+        }
+    }
+    else{ // 둘다 할당 안되있는 경우
+        asize = getAsize(size);
+        if( (prev_size + now_size + next_size) <= asize ){
+            oldptr = coalesce( oldptr );
+            place(oldptr, asize);
+            return oldptr;
+        }    
+    }
+    // 케이스에 해당하지 않는 경우
     newptr = mm_malloc(size);
     if (newptr == NULL){
-      return NULL;
+        return NULL;
     }
     copySize = GET_SIZE(HDRP(oldptr));
     if (size < copySize){
-      copySize = size;
+        copySize = size;
     }
-    memcpy(newptr, oldptr, copySize);// 메모리의 특정한 부분으로부터 얼마까지의 부분을 다른 메모리 영역으로 복사해주는 함수(old_bp로부터 copySize만큼의 문자를 new_bp로 복사해라)
+    memmove(newptr, oldptr, copySize);// 메모리의 특정한 부분으로부터 얼마까지의 부분을 다른 메모리 영역으로 복사해주는 함수(old_bp로부터 copySize만큼의 문자를 new_bp로 복사해라)
     mm_free(oldptr);
     return newptr;
+
+}
+
+void *mm_realloc3(void *ptr, size_t size)
+{
+    if (ptr == NULL)
+    {
+        return mm_malloc(size);
+    }
+    if (size == 0)
+    {
+        mm_free(ptr);
+        return NULL;
+    }
+    void *oldptr = ptr;
+    void *newptr;
+    size_t copySize = GET_SIZE(HDRP(oldptr));
+    if (size + DSIZE <= copySize)
+    {
+        return oldptr;
+    }
+    else
+    {
+        size_t next_size = copySize + GET_SIZE(HDRP(NEXT_BLKP(oldptr)));
+        if (!GET_ALLOC(HDRP(NEXT_BLKP(oldptr))) && (size + DSIZE <= next_size))
+        {
+            PUT(HDRP(oldptr), PACK(next_size, 1));
+            PUT(FTRP(oldptr), PACK(next_size, 1));
+            return oldptr;
+        }
+        else
+        {
+            newptr = mm_malloc(size + DSIZE);
+            if (newptr == NULL)
+            {
+                return NULL;
+            }
+            memmove(newptr, oldptr, size + DSIZE);
+            mm_free(oldptr);
+            return newptr;
+        }
+    }
 }
