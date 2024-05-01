@@ -64,7 +64,7 @@ team_t team = {
 
 /* 블록 ptr bp가 주어지면 헤더와 푸터의 주소를 계산합니다 */
 #define HDRP(bp) ((char *)(bp) - WSIZE)
-#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+// #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
 /* 블록 ptr bp가 주어지면 다음 블록과 이전 블록의 주소를 계산합니다 */
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
@@ -74,7 +74,7 @@ team_t team = {
 #define GET_PRED(bp) (*(void **)(bp))                   // 이전 가용 블록의 주소
 
 // 가용 리스트의 개수
-#define SEGREGATED_SIZE (12) 
+#define SEGREGATED_SIZE (20) 
 
 // 해당 가용 리스트의 루트
 #define GET_ROOT(class) (*(void **)((char *)(heap_listp) + (WSIZE * class)))
@@ -108,7 +108,7 @@ static void *extend_heap(size_t words)
     
     /* 프리 블록의 헤더, 푸터 및 에필로그 헤더 초기화 */
     PUT(HDRP(bp), PACK(size,0)); // 가용 블록 헤더
-    PUT(FTRP(bp), PACK(size,0)); // 가용 블록 푸터
+
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0,1)); // 새 에필로그 헤더
 
     if(find_fit_flag == 2){
@@ -121,48 +121,38 @@ static void *extend_heap(size_t words)
 
 static void *coalesce(void *bp)
 {
-    // printf("coalesce\n");
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 이전 블록의 크기 반환 
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp))); // 다음 블록의 크기 반환
-    size_t size = GET_SIZE(HDRP(bp)); // 현재 블록의 크기 반환
+    add_free_block(bp);                                      // 현재 블록을 free list에 추가
+    size_t csize = GET_SIZE(HDRP(bp));                       // 반환할 사이즈
+    void *root = heap_listp + (SEGREGATED_SIZE + 1) * WSIZE; // 실제 메모리 블록들이 시작하는 위치
+    void *left_buddyp;                                       // 왼쪽 버디의 bp
+    void *right_buddyp;                                      // 오른쪽 버디의 bp
     
-    // printf("test1 %d ",GET_SIZE(FTRP(PREV_BLKP(bp))));
-    // printf("test2 %d ",GET_SIZE(HDRP(NEXT_BLKP(bp))));
-
-    if( prev_alloc && next_alloc ){ // 이전 블록과 다음 블록이 할당되었다면 case 1
-        add_free_block(bp); // free_list에 추가
-        if(find_fit_flag == 2){
-            next_fit_sbp = bp; // 왜 이걸 주석하면 오류가 나는지 모르겠네
+    while (1)
+    {
+        // 좌우 버디의 bp 파악
+        if ((bp - root) & csize) // 현재 블록에서 힙까지의 메모리 합(bp - root)과 csize가 중복되는 비트가 있다면 현재 블록은 오른쪽 버디에 해당
+        {
+            left_buddyp = bp - csize;
+            right_buddyp = bp;
         }
-        return bp; // 현재 블록 포인터만 반환
-    }
+        else
+        {
+            right_buddyp = bp + csize;
+            left_buddyp = bp;
+        }
 
-    else if( prev_alloc && !next_alloc ){ /* 앞 블록은 할당되어있고 뒤 블록은 할당 안되어 있다면 case 2 */
-        splice_free_block(NEXT_BLKP(bp)); // 가용 블록을 free_list에서 제거
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp))); // 뒤 블록의 사이즈를 bp 블록 사이즈와 더해준다.
-        PUT(HDRP(bp), PACK(size, 0)); // 합쳤으니까, 현재 블록의 헤더는 메모리 할당을 해제하며, 뒤 블록과 합친 사이즈를 사이즈에 할당해준다.
-        PUT(FTRP(bp), PACK(size, 0)); // 마찬가지로 푸터는 헤더의 복사본이브로 같은 처리
-    }
-
-    else if( !prev_alloc && next_alloc ){ /* 앞 블록은 할당 안되어 있고 뒤 블록은 할당되어 있다면 case 3 */
-        splice_free_block(PREV_BLKP(bp)); // 가용 블록을 free_list에서 제거
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))); // 이전 블록의 사이즈를 bp 블록 사이즈와 더해줌
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0)); // 헤더는 이전 블록의 
-        PUT(FTRP(bp), PACK(size, 0)); // 푸터는 메모리 할당 해제하고 크기를 재할당.
-        bp = PREV_BLKP(bp); 
-    }
-
-    else{ // 둘다 할당 안된 경우 case 4
-        splice_free_block(PREV_BLKP(bp)); // 이전 가용 블록을 free_list에서 제거
-        splice_free_block(NEXT_BLKP(bp)); // 다음 가용 블록을 free_list에서 제거
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp); 
-    }
-    add_free_block(bp); // 현재 병합한 가용 블록을 free_list에 추가
-    if(find_fit_flag == 2){
-        next_fit_sbp = bp; // 왜 이걸 주석하면 오류가 나는지 모르겠네
+        // 양쪽 버디가 모두 가용 상태이고, 각 사이즈가 동일하면 (각 버디가 분할되어있지 않으면)
+        if (!GET_ALLOC(HDRP(left_buddyp)) && !GET_ALLOC(HDRP(right_buddyp)) && GET_SIZE(HDRP(left_buddyp)) == GET_SIZE(HDRP(right_buddyp)))
+        {
+            splice_free_block(left_buddyp); // 양쪽 버디를 모두 가용 리스트에서 제거
+            splice_free_block(right_buddyp);
+            csize <<= 1;                            // size를 2배로 변경
+            PUT(HDRP(left_buddyp), PACK(csize, 0)); // 왼쪽 버디부터 size만큼 가용 블록으로 변경
+            add_free_block(left_buddyp);            // 가용 블록으로 변경된 블록을 free list에 추가
+            bp = left_buddyp;
+        }
+        else
+            break;
     }
     return bp;
 }
@@ -224,7 +214,7 @@ size_t getAsize(size_t size){
 void *mm_malloc(size_t size)
 {
     // printf("malloc\n");
-    size_t asize; /* 조정된 블록 사이즈 */ 
+    size_t asize = 16; /* 조정된 블록 사이즈 */ 
     size_t extendsize; /* 적합하지 않을 때 힙을 확장할 용량  */
     char *bp; // 블록 포인터
 
@@ -234,8 +224,15 @@ void *mm_malloc(size_t size)
     }
     
     /* 오버헤드 및 정렬 요구 사항을 포함하도록 블록 크기를 조정합니다. */
-
-    asize = getAsize(size);
+    /*
+        (find_fit과 splice_free_block, add_free_block 함수는 Segregated-fits와 동일하다.)
+        요청 받은 size에 헤더와 푸터 크기인 8bytes를 더하고 나서 2의 n승이 되도록 올림 처리한 후 크기에 맞는 가용 블록을 탐색한다.
+    */
+    /* 사이즈 조정 */
+    while (asize < size + DSIZE) // 요청받은 size에 8(헤더와 푸터 크기)를 더한 값을 2의 n승이 되도록 올림
+    {
+        asize <<= 1;
+    }
 
     // printf("작동 시작");
     /* 적합한 가용영역 검색 */
@@ -328,28 +325,21 @@ static void *find_fit( size_t asize, size_t flag )
 }
 
 static void place( void *bp, size_t asize )
-{   
-    splice_free_block(bp); // free_list에서 해당 블록 제거
-    size_t csize = GET_SIZE(HDRP(bp)); // 현재 빈 공간의 크기 저장
-    // printf("csize  %d\n",csize);
-    if((csize - asize) >= (2*DSIZE)){ // 현재 빈 공간에서 할당할 공간을 뺀 합이 16 바이트 보다 크다면
-        PUT(HDRP(bp), PACK(asize,1)); // 데이터 공간 할당
-        PUT(FTRP(bp), PACK(asize,1)); // 데이터 공간 할당
-        bp = NEXT_BLKP(bp); // 다음 블록으로 이동
-        PUT(HDRP(bp), PACK(csize-asize,0)); // 이동한 블럭의 헤더를 설정해 준다.
-        PUT(FTRP(bp), PACK(csize-asize,0)); // 푸터를설정해 주어 가용 데이터 블록을 분할한다.
+{      
+    /*
+     * 할당할 블록을 탐색할 때는 Segregated-fits와 동일하게 크기에 맞는 가용 리스트에서 탐색을 진행하고, 블록이 존재하지 않는다면 다음 가용 리스트로 이동해서 탐색을 이어나간다.
+     * 선택한 블록의 크기가 할당하려는 size와 다르다면 필요한 사이즈의 블록이 될 때까지 반으로 나누고 사용하지 않는 부분은 나눠진 크기에 적합한 가용 리스트에 추가한다.
+    */
+    splice_free_block(bp);             // free_list에서 해당 블록 제거
+    size_t csize = GET_SIZE(HDRP(bp)); // 사용하려는 블록의 크기
 
-        if(find_fit_flag == 2){
-            next_fit_sbp = bp;
-        }
-        add_free_block(bp); // 남은 블록을 free_list에 추가
-    }else{ // 16바이트 보다 작다면 그냥 할당
-        PUT(HDRP(bp), PACK(csize,1));
-        PUT(FTRP(bp), PACK(csize,1));
-        if(find_fit_flag == 2){
-            next_fit_sbp = NEXT_BLKP(bp);
-        }
+    while (asize != csize) // 사용하려는 asize와 블록의 크기 csize가 다르면
+    {
+        csize >>= 1;                           // 블록의 크기를 반으로 나눔
+        PUT(HDRP(bp + csize), PACK(csize, 0)); // 뒷부분을 가용 블록으로 변경
+        add_free_block(bp + csize);            // 뒷부분을 가용 블록 리스트에 추가
     }
+    PUT(HDRP(bp), PACK(csize, 1)); // 크기가 같아지면 해당 블록 사용 처리
 }
 
 /*
@@ -361,7 +351,7 @@ void mm_free(void *ptr)
     size_t size = GET_SIZE(HDRP(ptr)); // 블록 포인터의 헤더에서 크기정보와 주소를 읽는다.
 
     PUT(HDRP(ptr), PACK(size,0)); // 해당 블록 포인터의 헤더와 푸터를 할당 해제 해준다.
-    PUT(FTRP(ptr), PACK(size,0)); // 해당 블록 포인터의 헤더와 푸터를 할당 해제 해준다.
+    
     coalesce(ptr);
 }
 
@@ -387,8 +377,8 @@ void *mm_realloc(void *ptr, size_t size)
     }
 
     int now_size = GET_SIZE(HDRP(oldptr));
-    int prev_is_alloc = GET_ALLOC(FTRP(PREV_BLKP( oldptr )));
-    int prev_size = GET_SIZE(FTRP(PREV_BLKP(oldptr )));
+    int prev_is_alloc = GET_ALLOC(HDRP(PREV_BLKP( oldptr )));
+    int prev_size = GET_SIZE(HDRP(PREV_BLKP(oldptr )));
     int next_is_alloc = GET_ALLOC(HDRP(NEXT_BLKP( oldptr )));
     int next_size = GET_SIZE(HDRP(NEXT_BLKP( oldptr )));
     
@@ -450,34 +440,24 @@ static void splice_free_block(void *bp)
     if (GET_SUCC(bp) != NULL) // 다음 가용 블록이 있을 경우만
         GET_PRED(GET_SUCC(bp)) = GET_PRED(bp);
 }
-// 적합한 가용 리스트를 찾아서 맨 앞에 현재 블록을 추가하는 함수
+ // 가용 리스트의 맨 앞에 현재 블록을 추가하는 함수
 static void add_free_block(void *bp)
 {
-    int class = get_class(GET_SIZE(HDRP(bp)));
-    GET_SUCC(bp) = GET_ROOT(class);     // bp의 해당 가용 리스트의 루트가 가리키던 블록
-    if (GET_ROOT(class) != NULL)        // list에 블록이 존재했을 경우만
-        GET_PRED(GET_ROOT(class)) = bp; // 루트였던 블록의 PRED를 추가된 블록으로 연결
-    GET_ROOT(class) = bp;
+    GET_SUCC(bp) = heap_listp;     // bp의 SUCC은 루트가 가리키던 블록
+    if (heap_listp != NULL)        // free list에 블록이 존재했을 경우만
+        GET_PRED(heap_listp) = bp; // 루트였던 블록의 PRED를 추가된 블록으로 연결
+    heap_listp = bp;               // 루트를 현재 블록으로 변경
 }
 // 적합한 가용 리스트를 찾는 함수
 int get_class(size_t size)
 {
-    if (size < 16) // 최소 블록 크기는 16바이트
-        return -1; // 잘못된 크기
-
-    // 클래스별 최소 크기
-    size_t class_sizes[SEGREGATED_SIZE];
-    class_sizes[0] = 16;
-
-    // 주어진 크기에 적합한 클래스 검색
-    for (int i = 0; i < SEGREGATED_SIZE; i++)
+    int next_power_of_2 = 1;
+    int class = 0;
+    while (next_power_of_2 < size && class + 1 < SEGREGATED_SIZE)
     {
-        if (i != 0)
-            class_sizes[i] = class_sizes[i - 1] << 1;
-        if (size <= class_sizes[i])
-            return i;
+        next_power_of_2 <<= 1;
+        class ++;
     }
 
-    // 주어진 크기가 마지막 클래스의 범위를 넘어갈 경우, 마지막 클래스로 처리
-    return SEGREGATED_SIZE - 1;
+    return class;
 }

@@ -14,6 +14,8 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <errno.h>
 
 #include "mm.h"
 #include "memlib.h"
@@ -65,20 +67,16 @@ team_t team = {
 /* 블록 ptr bp가 주어지면 헤더와 푸터의 주소를 계산합니다 */
 #define HDRP(bp) ((char *)(bp) - WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+// #define PRRP(bp) ((char *)(bp) + DSIZE) // PREDECESS POINTER
+// #define SURP(bp) ((char *)(bp) + DSIZE + WSIZE) // SUCCESS POINTER
 
 /* 블록 ptr bp가 주어지면 다음 블록과 이전 블록의 주소를 계산합니다 */
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
-#define GET_SUCC(bp) (*(void **)((char *)(bp) + WSIZE)) // 다음 가용 블록의 주소
-#define GET_PRED(bp) (*(void **)(bp))                   // 이전 가용 블록의 주소
-
-// 가용 리스트의 개수
-#define SEGREGATED_SIZE (12) 
-
-// 해당 가용 리스트의 루트
-#define GET_ROOT(class) (*(void **)((char *)(heap_listp) + (WSIZE * class)))
-
+// **Explicit**
+#define PRED_FREEP(bp) (*(void **)(bp))                                        // 이전 가용 블록의 주소
+#define SUCC_FREEP(bp) (*(void **)(bp + WSIZE))                                // 다음 가용 블록의 주소
 void *heap_listp;
 
 static void *next_fit_sbp = NULL; // search block pointer
@@ -87,10 +85,10 @@ static void *coalesce(void *bp);
 static void *find_fit( size_t asize, size_t flag );
 static void place(void *bp, size_t asize);
 static void *extend_heap(size_t words);
-// 가용 리스트에서 bp에 해당하는 블록을 제거하는 함수
-static void splice_free_block(void *bp);
-// 가용 리스트의 맨 앞에 현재 블록을 추가하는 함수
-static void add_free_block(void *bp);
+
+void removeFreeBlock(void *bp);
+void putFreeBlock(void *bp);
+void *free_listp = NULL;         // 가용 블록 리스트의 시작 부분
 
 
 static size_t find_fit_flag = 1;
@@ -101,7 +99,8 @@ static void *extend_heap(size_t words)
     char *bp; // 블록 포인터 생성
     size_t size;
 
-    /* 워드의 정렬을 유지하기 위해 짝수개로 할당한다. */
+    /* words % 2 가 0이면 2의 배수가 되니 거기에 4를 곱해 8의 배수를 만들어 준다. */
+    /* 왜? 워드의 정렬을 유지하기 위해*/
     size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
     if ((long) (bp = mem_sbrk(size)) == -1)
         return NULL;
@@ -129,41 +128,45 @@ static void *coalesce(void *bp)
     // printf("test1 %d ",GET_SIZE(FTRP(PREV_BLKP(bp))));
     // printf("test2 %d ",GET_SIZE(HDRP(NEXT_BLKP(bp))));
 
-    if( prev_alloc && next_alloc ){ // 이전 블록과 다음 블록이 할당되었다면 case 1
-        add_free_block(bp); // free_list에 추가
-        if(find_fit_flag == 2){
-            next_fit_sbp = bp; // 왜 이걸 주석하면 오류가 나는지 모르겠네
-        }
-        return bp; // 현재 블록 포인터만 반환
-    }
+    // if( prev_alloc && next_alloc ){ // 이전 블록과 다음 블록이 할당되었다면 case 1
+    //     return bp; // 현재 블록 포인터만 반환
+    // }
 
-    else if( prev_alloc && !next_alloc ){ /* 앞 블록은 할당되어있고 뒤 블록은 할당 안되어 있다면 case 2 */
-        splice_free_block(NEXT_BLKP(bp)); // 가용 블록을 free_list에서 제거
+    if( prev_alloc && !next_alloc ){ /* 앞 블록은 할당되어있고 뒤 블록은 할당 안되어 있다면 case 2 */
+        
+        removeFreeBlock(NEXT_BLKP(bp));             // 다음 블록을 리스트에서 삭제
+
         size += GET_SIZE(HDRP(NEXT_BLKP(bp))); // 뒤 블록의 사이즈를 bp 블록 사이즈와 더해준다.
         PUT(HDRP(bp), PACK(size, 0)); // 합쳤으니까, 현재 블록의 헤더는 메모리 할당을 해제하며, 뒤 블록과 합친 사이즈를 사이즈에 할당해준다.
+        // printf("%s %s^_^^_^^_^^_^^_^^_^^_^", FTRP(bp),FTRP(NEXT_BLKP(bp)));
         PUT(FTRP(bp), PACK(size, 0)); // 마찬가지로 푸터는 헤더의 복사본이브로 같은 처리
+        // 위에 것이 맞다. 그 이유는 FTRP에서 푸터의 주소를 찾는 방법이 헤더에 정의된 사이즈를 기반으로 찾기 때문이다.
+        // PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0)); // 마찬가지로 푸터는 헤더의 복사본이브로 같은 처리 
     }
 
     else if( !prev_alloc && next_alloc ){ /* 앞 블록은 할당 안되어 있고 뒤 블록은 할당되어 있다면 case 3 */
-        splice_free_block(PREV_BLKP(bp)); // 가용 블록을 free_list에서 제거
+        
+        removeFreeBlock(PREV_BLKP(bp));             // 이전 블록을 리스트에서 삭제
         size += GET_SIZE(HDRP(PREV_BLKP(bp))); // 이전 블록의 사이즈를 bp 블록 사이즈와 더해줌
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0)); // 헤더는 이전 블록의 
         PUT(FTRP(bp), PACK(size, 0)); // 푸터는 메모리 할당 해제하고 크기를 재할당.
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0)); // 헤더는 이전 블록의 
         bp = PREV_BLKP(bp); 
     }
 
     else{ // 둘다 할당 안된 경우 case 4
-        splice_free_block(PREV_BLKP(bp)); // 이전 가용 블록을 free_list에서 제거
-        splice_free_block(NEXT_BLKP(bp)); // 다음 가용 블록을 free_list에서 제거
+
+        removeFreeBlock(PREV_BLKP(bp));                                             // 이전 블록을 리스트에서 삭제
+        removeFreeBlock(NEXT_BLKP(bp));                                             // 다음 블록을 리스트에서 삭제
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp); 
+        PUT(HDRP(bp), PACK(size, 0));
+        PUT(FTRP(bp), PACK(size, 0));
     }
-    add_free_block(bp); // 현재 병합한 가용 블록을 free_list에 추가
+
     if(find_fit_flag == 2){
         next_fit_sbp = bp; // 왜 이걸 주석하면 오류가 나는지 모르겠네
     }
+    putFreeBlock(bp);                                                               // 병합된 블록을 free list에 추가
     return bp;
 }
 
@@ -172,32 +175,31 @@ static void *coalesce(void *bp)
  */
 int mm_init(void)
 {   
+    // printf("init\n");
+    // printf("^_^^_^^_^^_^^_^^_^^_^");
+    /*
+        할당기는 힙을 하나의 커다란 바이트 배열과, 이 배열의 첫 바이트를 가리키는 포인터 p로 구성할 수 있다.
+        size 바이트를 할당하기 위해서 malloc은 현재 p 값을 스택에 저장하고, p를 size 만큼 증가시키며, p의 이전 값을 호출자에게 리턴한다.
+    */
     /* 초기화된 빈 힙 생성 */
-    if ((heap_listp = mem_sbrk((SEGREGATED_SIZE+4)*WSIZE)) == (void *)-1) { // 8워드 크기의 힙 생성,
-    // heap_listp의 힙의 시작 주소값 할당(가용 블록만 추적함)
+    if ((heap_listp = mem_sbrk(6*WSIZE)) == (void *)-1) {
         return -1;
     }
     PUT(heap_listp, 0); // 초기 패딩 삽입
-    PUT(heap_listp + (1*WSIZE), PACK((SEGREGATED_SIZE + 2)* WSIZE, 1)); // 프롤로그 블록의 헤더 삽입
-
-    for (int i = 0; i < SEGREGATED_SIZE; i++)
-    {
-        PUT(heap_listp+ ((2+i) * WSIZE), NULL);
-    }
-    PUT(heap_listp + ((SEGREGATED_SIZE + 2) * WSIZE), PACK((SEGREGATED_SIZE + 2) * WSIZE, 1));  // 프롤로그 블록의 푸터 삽입    
-
-    PUT(heap_listp + ((SEGREGATED_SIZE + 3) * WSIZE), PACK(0, 1));  // 에필로그 블록의 헤더 삽입
-    
+    PUT(heap_listp + (1*WSIZE), PACK(2 * DSIZE, 1)); // 프롤로그 블록의 헤더 삽입
+    PUT(heap_listp + (2 * WSIZE), NULL);                        // Prologue의 이전 가용 블록 주소
+    PUT(heap_listp + (3 * WSIZE), NULL);                        // Prologue의 다음 가용 블록 주소
+    PUT(heap_listp + (4*WSIZE), PACK(2 * DSIZE, 1));  // 프롤로그 블록의 푸터 삽입
+    PUT(heap_listp + (5*WSIZE), PACK(0, 1));  // 에필로그 블록의 헤더 삽입
     /* 여기까지 했을때 전체 힙의 모양은 
-        빈공간 + 프롤로그 헤더 + 프롤로그 푸터 + 가용 블록 + 에필로그 헤더가 된다. */
-    heap_listp += (2 * WSIZE); // 첫 가용 블록의 bp
+        빈공간 + 프롤로그 헤더 + 프롤로그 푸터 + 에필로그 헤더가 된다. */
+    // heap_listp += (2*WSIZE); // 힙 가용 리스트 포인터의 위치를 프롤로그 블록의 헤더와 푸터의 사이로 한다.
     
     if(find_fit_flag == 2){
         next_fit_sbp = heap_listp;
     }
+    free_listp = heap_listp + DSIZE;
 
-    if (extend_heap(4) == NULL)
-        return -1;
     /* 청크 사이즈의 가용 블록으로 빈 힙을 확장한다. */
     if(extend_heap(CHUNKSIZE/WSIZE) == NULL){
         return -1;
@@ -209,10 +211,10 @@ int mm_init(void)
 size_t getAsize(size_t size){
     size_t asize;
         /* 오버헤드 및 정렬 요구 사항을 포함하도록 블록 크기를 조정합니다. */
-    if(size <= DSIZE){
-        asize = 2*DSIZE; // 왜 16바이트인가... 헤더 1블록 4바이트, 푸터 1블록 4바이트, 데이터는 정렬 조건을 맞추기 위해 2블록 이상 필요
+    if(size <= DSIZE){ // 왜냐하면 PRED, SUCC 포인터가 추가되어 8바이트가 어 늘어났기 때문이다.
+        asize = 2*DSIZE; // 왜 24바이트인가... 헤더 1블록 4바이트, 푸터 1블록 4바이트, PRED, SUCC 포인터 각각 4바이트,데이터는 정렬 조건을 맞추기 위해 2블록 이상 필요
     }else{
-        asize = DSIZE * (( size + (DSIZE) + (DSIZE-1) ) / DSIZE);
+        asize = DSIZE * (( size + (2*DSIZE) + (DSIZE-1) ) / DSIZE);
     }
     return asize;    
 }
@@ -257,36 +259,85 @@ void *mm_malloc(size_t size)
 
 static void *find_fit( size_t asize, size_t flag )
 {   
-    int class = get_class(asize);
-    void *bp = GET_ROOT(class);
+    // printf("find fit");
+    // char *temp = heap_listp; // 템프 받음
+    // // 맨땅 코드 
+    // while (NEXT_BLKP(temp) != NULL && GET_SIZE(NEXT_BLKP(temp)) != 0) // 다음블록이 없거나, 다음 블록의 사이즈가 0일때 == 에필로그 블록일 경우
+    // {
+    //     if ( GET_ALLOC(HDRP(temp))){ // 메모리가 할당 되어 있다면?
+    //         temp = NEXT_BLKP(temp); // 다음 블록 확인
+    //         continue;
+    //     }else{ // 할당이 안되어 있다면? 
+    //         if ( GET_SIZE(HDRP(temp)) >= asize ){ // 사이즈 확인
+    //             return temp; // 사이즈가 적당하다? 바로 리턴
+    //         }else{ // 아니다?
+    //             temp = NEXT_BLKP(temp); // 다음 블록 확인
+    //         }
+    //     }
+            
+    // } // 특정 상황에서 while문을 탈출하지 못하는것 같다.
+    // 1차 최적화-답지
+    // 분기가 적어서? 
+    void *bp;
 
     if (flag == 1){ // first fit
-        while (class < SEGREGATED_SIZE) // 현재 탐색하는 클래스가 범위 안에 있는 동안 반복
-        {
-            bp = GET_ROOT(class);
-            while (bp != NULL)
-            {
-                if ((asize <= GET_SIZE(HDRP(bp)))) // 적합한 사이즈의 블록을 찾으면 반환
-                    return bp;
-                bp = GET_SUCC(bp); // 다음 가용 블록으로 이동
-            }
-            class += 1;
-        }
-        
-    }else if(flag == 2){ // next fit
-       
-        for (bp = (char*)next_fit_sbp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-            if ((asize <= GET_SIZE(HDRP(bp)))) {
-        // printf("1차 값 갱신\n");
-                next_fit_sbp = NEXT_BLKP(bp); // 다음 탐색 위치 갱신
+        for (bp = free_listp; GET_ALLOC(HDRP(bp)) != 1; bp = SUCC_FREEP(bp)){
+            if((asize <= GET_SIZE(HDRP(bp)))){
                 return bp;
             }
         }
+    }else if(flag == 2){ // next fit
+        // 선조의 깔끔한 코드. 왜 안되는지 찾다가 보았다.
+        // void *old_pointp = next_fit_sbp;
+        // for (bp = next_fit_sbp; GET_SIZE(HDRP(bp)); bp = NEXT_BLKP(bp))
+        // {
+        //     if (!GET_ALLOC(HDRP(bp)) && GET_SIZE(HDRP(bp)) >= asize)
+        //     {
+        //         next_fit_sbp = NEXT_BLKP(bp);
+        //         return bp;
+        //     }
+        // }
+        // for (bp = heap_listp; bp < old_pointp; bp = NEXT_BLKP(bp))
+        // {
+        //     if ((!GET_ALLOC(HDRP(bp))) && GET_SIZE(HDRP(bp)) >= asize)
+        //     {
+        //         next_fit_sbp = NEXT_BLKP(bp);
+        //         return bp;
+        //     }
+        // }
+        // return NULL;
+        
+        // if (next_fit_sbp == NULL){ // init에서 초기화 해주도록 변경
+        //     next_fit_sbp = (char*)heap_listp;
+        // } 
+        // 여기부터 내가 작성한 코드
+        // if (GET_SIZE(HDRP(NEXT_BLKP(next_fit_sbp))) == 0)
+        // { // 에필로그 블록까지 next_fit 검색 포인터가 이동했다면 다시 prollogue 블록으로 포인터이동
+            // printf("is epillogue block");
+            // next_fit_sbp = (char*)heap_listp; //이 로직을 없애면 성능이 향상된다.
+        // }
+        // 왜 안되는지 모르겠네
+
+        // else bp = (char*)heap_listp;
+        // for (bp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+        //     if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+        //         next_fit_sbp = bp;
+        //         return bp;
+        //     }
+        // }
+        for (bp = free_listp; GET_SIZE(HDRP(bp)) > 0; bp = SUCC_FREEP(bp)) {
+            if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+        // printf("1차 값 갱신\n");
+                free_listp = SUCC_FREEP(bp); // 다음 탐색 위치 갱신
+                return bp;
+            }
+        }
+        // printf("1차 통과\n");
         // 다음 fit을 위해 처음부터 다시 탐색
-        for (bp = (char*)heap_listp; bp != next_fit_sbp; bp = NEXT_BLKP(bp)) {
-            if ((asize <= GET_SIZE(HDRP(bp))) ) {
+        for (bp = free_listp; bp != free_listp; bp = SUCC_FREEP(bp)) {
+            if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))) ) {
         // printf("2차 값 갱신\n");
-                next_fit_sbp = NEXT_BLKP(bp); // 다음 탐색 위치 갱신
+                free_listp = SUCC_FREEP(bp); // 다음 탐색 위치 갱신
                 return bp;
             }
         }
@@ -294,8 +345,8 @@ static void *find_fit( size_t asize, size_t flag )
     }else if(flag == 3){ // best fit
         void *bp_temp = NULL;
         // printf(" bp_temp %d \n", GET_SIZE(HDRP(bp_temp)));
-        for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
-            if((asize <= GET_SIZE(HDRP(bp)))){
+        for (bp = free_listp; GET_SIZE(HDRP(bp)) > 0; bp = SUCC_FREEP(bp)){
+            if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
                 // printf("in for ..  bp_temp %d bp .. %d\n", GET_SIZE(HDRP(bp_temp)),GET_SIZE(HDRP(bp)));
                 if (bp_temp != NULL){
                     if ( GET_SIZE(HDRP(bp_temp)) > GET_SIZE(HDRP(bp)) ){
@@ -309,16 +360,10 @@ static void *find_fit( size_t asize, size_t flag )
         return bp_temp;
         
     }else{ // first fit
-        while (class < SEGREGATED_SIZE) // 현재 탐색하는 클래스가 범위 안에 있는 동안 반복
-        {
-            bp = GET_ROOT(class);
-            while (bp != NULL)
-            {
-                if ((asize <= GET_SIZE(HDRP(bp)))) // 적합한 사이즈의 블록을 찾으면 반환
-                    return bp;
-                bp = GET_SUCC(bp); // 다음 가용 블록으로 이동
+        for (bp =free_listp; GET_SIZE(HDRP(bp)) > 0; bp = SUCC_FREEP(bp)){
+            if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+                return bp;
             }
-            class += 1;
         }
     }
 
@@ -328,9 +373,10 @@ static void *find_fit( size_t asize, size_t flag )
 }
 
 static void place( void *bp, size_t asize )
-{   
-    splice_free_block(bp); // free_list에서 해당 블록 제거
+{
+    // printf("place\n");
     size_t csize = GET_SIZE(HDRP(bp)); // 현재 빈 공간의 크기 저장
+    removeFreeBlock(bp);      // 현재 블록 삭제
     // printf("csize  %d\n",csize);
     if((csize - asize) >= (2*DSIZE)){ // 현재 빈 공간에서 할당할 공간을 뺀 합이 16 바이트 보다 크다면
         PUT(HDRP(bp), PACK(asize,1)); // 데이터 공간 할당
@@ -342,7 +388,7 @@ static void place( void *bp, size_t asize )
         if(find_fit_flag == 2){
             next_fit_sbp = bp;
         }
-        add_free_block(bp); // 남은 블록을 free_list에 추가
+        putFreeBlock(bp);                                       // 분할된 (남은 가용) 블록을 free list에 삽입
     }else{ // 16바이트 보다 작다면 그냥 할당
         PUT(HDRP(bp), PACK(csize,1));
         PUT(FTRP(bp), PACK(csize,1));
@@ -435,49 +481,34 @@ void *mm_realloc(void *ptr, size_t size)
 
 }
 
-// 가용 리스트에서 bp에 해당하는 블록을 제거하는 함수
-static void splice_free_block(void *bp)
+/*
+* Explicit
+* - LIFO 방식으로 새로 반환되거나 생성된 가용 블록을 free list 맨 앞에 추가
+* - free list 맨 앞은 프롤로그 블록
+*/
+
+// free list에 가용 블록을 추가하는 함수
+void putFreeBlock(void *bp)
 {
-    int class = get_class(GET_SIZE(HDRP(bp)));
-    if (bp == GET_ROOT(class)) // 분리하려는 블록이 free_list 맨 앞에 있는 블록이면 (이전 블록이 없음)
+    SUCC_FREEP(bp) = free_listp;                // 후임자를 기존의 첫번째 가용 블록으로 지정
+    PRED_FREEP(bp) = NULL;                      // 전임자는 NULL로 초기화
+    PRED_FREEP(free_listp) = bp;                // free list의 첫번째 가용 블록의 전임자를 bp로 지정 (양방향 지정)
+    free_listp = bp;                            // free list의 처음을 가리키는 포인터 업데이트
+}
+
+// free list에서 가용 블록을 삭제하는 함수
+void removeFreeBlock(void *bp)
+{
+    if (bp == free_listp)                               // 만약 삭제하려는 블록이 첫번째 블록이라면
     {
-        GET_ROOT(class) = GET_SUCC(GET_ROOT(class)); // 다음 블록을 루트로 변경
-        return;
+        PRED_FREEP(SUCC_FREEP(bp)) = NULL;              // 후임자 블록의 전임자를 NULL로 초기화
+        free_listp = SUCC_FREEP(bp);                    // free listp 업데이트
     }
-    // 이전 블록의 SUCC을 다음 가용 블록으로 연결
-    GET_SUCC(GET_PRED(bp)) = GET_SUCC(bp);
-    // 다음 블록의 PRED를 이전 블록으로 변경
-    if (GET_SUCC(bp) != NULL) // 다음 가용 블록이 있을 경우만
-        GET_PRED(GET_SUCC(bp)) = GET_PRED(bp);
-}
-// 적합한 가용 리스트를 찾아서 맨 앞에 현재 블록을 추가하는 함수
-static void add_free_block(void *bp)
-{
-    int class = get_class(GET_SIZE(HDRP(bp)));
-    GET_SUCC(bp) = GET_ROOT(class);     // bp의 해당 가용 리스트의 루트가 가리키던 블록
-    if (GET_ROOT(class) != NULL)        // list에 블록이 존재했을 경우만
-        GET_PRED(GET_ROOT(class)) = bp; // 루트였던 블록의 PRED를 추가된 블록으로 연결
-    GET_ROOT(class) = bp;
-}
-// 적합한 가용 리스트를 찾는 함수
-int get_class(size_t size)
-{
-    if (size < 16) // 최소 블록 크기는 16바이트
-        return -1; // 잘못된 크기
-
-    // 클래스별 최소 크기
-    size_t class_sizes[SEGREGATED_SIZE];
-    class_sizes[0] = 16;
-
-    // 주어진 크기에 적합한 클래스 검색
-    for (int i = 0; i < SEGREGATED_SIZE; i++)
+    else
     {
-        if (i != 0)
-            class_sizes[i] = class_sizes[i - 1] << 1;
-        if (size <= class_sizes[i])
-            return i;
+        SUCC_FREEP(PRED_FREEP(bp)) = SUCC_FREEP(bp);    // 전임자 블록의 후임자를 bp의 후임자로 지정
+        PRED_FREEP(SUCC_FREEP(bp)) = PRED_FREEP(bp);    // 후임자 블록의 전임자를 bp의 전임자로 지정
     }
-
-    // 주어진 크기가 마지막 클래스의 범위를 넘어갈 경우, 마지막 클래스로 처리
-    return SEGREGATED_SIZE - 1;
 }
+
+
